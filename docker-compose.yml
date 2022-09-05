@@ -1,0 +1,80 @@
+# see https://github.com/compose-spec/compose-spec/blob/master/spec.md
+# see https://github.com/opencontainers/image-spec/blob/master/annotations.md
+services:
+  postgres:
+    # see https://hub.docker.com/_/postgres
+    # see https://github.com/docker-library/postgres/tree/master/11/bullseye
+    image: postgres:14-bullseye
+    environment:
+      - POSTGRES_PASSWORD=password
+    restart: on-failure
+  init:
+    depends_on:
+      - postgres
+    image: ghcr.io/rgl/ansible-init-postgres:main
+    # see https://www.postgresql.org/docs/11/libpq-envars.html
+    environment:
+      - PGHOST=postgres
+      # NB unfortunately, the postgresql ansible modules are not
+      #    using this PGPORT, so we have to explicitly use this
+      #    value in each module invocation.
+      #    see https://github.com/ansible-collections/community.postgresql/issues/311
+      - PGPORT=5432
+      - PGUSER=postgres
+      - PGPASSWORD=password
+    command:
+      - |
+        - hosts: localhost
+          connection: local
+          vars:
+            database: vaultwarden
+            users:
+              - name: vaultwarden
+                password: password
+                privs: all
+          tasks:
+            - name: Create database
+              postgresql_db:
+                name: '{{ database }}'
+                port: "{{ lookup('ansible.builtin.env', 'PGPORT') }}"
+            - name: Create user
+              postgresql_user:
+                name: '{{ item.name }}'
+                password: '{{ item.password }}'
+                port: "{{ lookup('ansible.builtin.env', 'PGPORT') }}"
+              loop: '{{ users }}'
+            - name: Grant user database permissions
+              postgresql_privs:
+                type: database
+                database: '{{ database }}'
+                roles: '{{ item.name }}'
+                privs: '{{ item.privs }}'
+                grant_option: false
+                port: "{{ lookup('ansible.builtin.env', 'PGPORT') }}"
+              loop: '{{ users }}'
+  mailhog:
+    image: mailhog/mailhog
+    restart: on-failure
+    ports:
+      - 8025:8025
+  vaultwarden:
+    depends_on:
+      - init
+      - mailhog
+    image: vaultwarden/server:1.25.2
+    ports:
+      - 8080:80
+    # see https://github.com/dani-garcia/vaultwarden/blob/1.25.2/.env.template
+    environment:
+      - DOMAIN=http://localhost:8080
+      - DATABASE_URL=postgresql://vaultwarden:password@postgres:5432/vaultwarden
+      - ADMIN_TOKEN=abracadabra
+      - SHOW_PASSWORD_HINT=false
+      - SMTP_SECURITY=off
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+      - SMTP_FROM=vaultwarden@example.com
+    volumes:
+      - vaultwarden:/data
+volumes:
+  vaultwarden:
